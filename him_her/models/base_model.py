@@ -71,3 +71,21 @@ class Episode:
     model_used: int
     him_triggered: bool
     revised_model: Optional[int]
+
+
+@dataclass
+class ModelSet:
+    """A set of agent models with pre-stacked parameters for efficient vmap.
+    
+    Attributes:
+        models: list of AgentModel instances
+        stacked_policy_params: shape (|M|, param_dim) — for vmap over models
+        log_priors: shape (|M|,) — log p(m) for each model
+    
+    Note:
+        stacked_policy_params is pre-computed at init so all_model_log_likelihoods
+        can vmap over the model dimension without Python-level iteration.
+    """
+    models: List[AgentModel]
+    stacked_policy_params: np.ndarray
+    log_priors: np.ndarray
