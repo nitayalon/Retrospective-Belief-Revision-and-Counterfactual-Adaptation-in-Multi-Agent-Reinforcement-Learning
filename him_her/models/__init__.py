@@ -1,0 +1,1 @@
+"""Other-agent model representations."""
