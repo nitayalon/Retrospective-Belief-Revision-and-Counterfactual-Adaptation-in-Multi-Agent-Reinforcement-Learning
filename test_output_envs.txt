@@ -1,0 +1,16 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.13.5, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\User\AppData\Local\Programs\Python\Python313\python.exe
+cachedir: .pytest_cache
+rootdir: C:\Users\User\OneDrive - huji.ac.il\מסמכים\PostDoc\Retrospective-Belief-Revision-and-Counterfactual-Adaptation-in-Multi-Agent-Reinforcement-Learning
+plugins: anyio-4.11.0, jaxtyping-0.3.9, langsmith-0.4.33
+collecting ... collected 7 items
+
+tests/test_envs.py::test_reset_returns_correct_shapes PASSED             [ 14%]
+tests/test_envs.py::test_switch_point_in_range PASSED                    [ 28%]
+tests/test_envs.py::test_info_keys_present PASSED                        [ 42%]
+tests/test_envs.py::test_compute_reward_jax_matches_numpy PASSED         [ 57%]
+tests/test_envs.py::test_model_forward_pure_jax PASSED                   [ 71%]
+tests/test_envs.py::test_policy_switch_occurs PASSED                     [ 85%]
+tests/test_envs.py::test_reward_is_binary PASSED                         [100%]
+
+============================== 7 passed in 4.05s ==============================

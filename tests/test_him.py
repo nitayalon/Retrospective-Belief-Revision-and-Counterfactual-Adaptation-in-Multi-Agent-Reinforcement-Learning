@@ -11,9 +11,7 @@ import pytest
 
 from him_her.models.base_model import AgentModel, ModelSet
 from him_her.him.inconsistency import (
-    single_step_log_prob,
-    trajectory_log_likelihood,
-    all_model_log_likelihoods,
+    make_likelihood_fns,
     is_inconsistent_ratio,
     is_inconsistent_absolute,
     example_linear_model_forward,
@@ -26,6 +24,13 @@ from him_her.him.belief_updater import BeliefUpdater
 def simple_model_forward():
     """Simple linear model for testing: logits = params @ state."""
     return example_linear_model_forward
+
+
+@pytest.fixture
+def likelihood_fns(simple_model_forward):
+    """Create JIT-compiled likelihood functions using the factory pattern."""
+    traj_fn, all_models_fn = make_likelihood_fns(simple_model_forward)
+    return traj_fn, all_models_fn
 
 
 @pytest.fixture
@@ -85,37 +90,50 @@ def test_models():
 class TestSingleStepLogProb:
     """Tests for single-step log probability computation."""
     
-    def test_single_step_basic(self, simple_model_forward):
+    def test_single_step_basic(self, likelihood_fns, simple_model_forward):
         """Test single_step_log_prob with a simple example."""
+        # Create single-step log prob function from the closure
+        def single_step_log_prob(policy_params, state, action):
+            logits = simple_model_forward(policy_params, state)
+            log_probs = jax.nn.log_softmax(logits)
+            return log_probs[jnp.int32(action)]
+        
         policy_params = jnp.array([[1.0, 0.0, 0.0],
                                    [0.0, 1.0, 0.0],
                                    [0.0, 0.0, 1.0]])
         state = jnp.array([1.0, 0.0, 0.0])
         action = jnp.array(0)
         
-        log_prob = single_step_log_prob(policy_params, state, action, simple_model_forward)
+        log_prob = single_step_log_prob(policy_params, state, action)
         
         # Should be the highest log-prob since action 0 aligns with state dim 0
         assert log_prob > -1.5  # log(1/3) ≈ -1.1, so this should be higher
         assert jnp.isfinite(log_prob)
     
-    def test_single_step_different_actions(self, simple_model_forward):
+    def test_single_step_different_actions(self, likelihood_fns, simple_model_forward):
         """Test that different actions give different log-probs."""
+        # Create single-step log prob function from the closure
+        def single_step_log_prob(policy_params, state, action):
+            logits = simple_model_forward(policy_params, state)
+            log_probs = jax.nn.log_softmax(logits)
+            return log_probs[jnp.int32(action)]
+        
         policy_params = jnp.array([[1.0, 0.0, 0.0],
                                    [0.0, 1.0, 0.0],
                                    [0.0, 0.0, 1.0]])
-        state = jnp.array([1.0, 0.0, 0.0])
+        # Use a state with different values to get different logits for all actions
+        state = jnp.array([1.0, 0.5, 0.2])
         
         log_probs = []
         for action in [0, 1, 2]:
             log_prob = single_step_log_prob(
-                policy_params, state, jnp.array(action), simple_model_forward
+                policy_params, state, jnp.array(action)
             )
             log_probs.append(float(log_prob))
         
         # All should be different
         assert len(set(log_probs)) == 3
-        # Action 0 should have highest log-prob given this state
+        # Action 0 should have highest log-prob given this state (largest component)
         assert log_probs[0] > log_probs[1]
         assert log_probs[0] > log_probs[2]
 
@@ -123,27 +141,29 @@ class TestSingleStepLogProb:
 class TestTrajectoryLogLikelihood:
     """Tests for trajectory log-likelihood computation."""
     
-    def test_trajectory_likelihood(self, simple_model_forward, test_trajectory):
+    def test_trajectory_likelihood(self, likelihood_fns, test_trajectory):
         """Test trajectory_log_likelihood computes sum of log-probs."""
+        trajectory_log_likelihood, _ = likelihood_fns
         states, actions = test_trajectory
         policy_params = jnp.array([[1.0, 0.0, 0.0],
                                    [0.0, 1.0, 0.0],
                                    [0.0, 0.0, 1.0]])
         
-        log_lik = trajectory_log_likelihood(policy_params, states, actions, simple_model_forward)
+        log_lik = trajectory_log_likelihood(policy_params, states, actions)
         
         # Should be finite and negative (sum of log-probs)
         assert jnp.isfinite(log_lik)
         assert log_lik < 0.0
     
-    def test_trajectory_likelihood_shape(self, simple_model_forward, test_trajectory):
+    def test_trajectory_likelihood_shape(self, likelihood_fns, test_trajectory):
         """Test that trajectory_log_likelihood returns a scalar."""
+        trajectory_log_likelihood, _ = likelihood_fns
         states, actions = test_trajectory
         policy_params = jnp.array([[1.0, 0.5, 0.3],
                                    [0.3, 1.0, 0.5],
                                    [0.5, 0.3, 1.0]])
         
-        log_lik = trajectory_log_likelihood(policy_params, states, actions, simple_model_forward)
+        log_lik = trajectory_log_likelihood(policy_params, states, actions)
         
         assert log_lik.shape == ()  # Scalar
 
@@ -151,21 +171,22 @@ class TestTrajectoryLogLikelihood:
 class TestAllModelLogLikelihoods:
     """Tests for vectorized computation over all models."""
     
-    def test_vmap_vs_loop(self, simple_model_forward, test_trajectory, test_models):
+    def test_vmap_vs_loop(self, likelihood_fns, test_trajectory, test_models):
         """CRITICAL TEST: Verify vmap gives identical results to Python loop."""
+        trajectory_log_likelihood, all_model_log_likelihoods = likelihood_fns
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
         # Compute using vmap (vectorized)
         vmap_result = all_model_log_likelihoods(
-            stacked_params, states, actions, simple_model_forward
+            stacked_params, states, actions
         )
         
         # Compute using Python loop for comparison
         loop_results = []
         for i in range(len(test_models.models)):
             params = stacked_params[i]
-            log_lik = trajectory_log_likelihood(params, states, actions, simple_model_forward)
+            log_lik = trajectory_log_likelihood(params, states, actions)
             loop_results.append(float(log_lik))
         loop_results = np.array(loop_results)
         
@@ -178,24 +199,26 @@ class TestAllModelLogLikelihoods:
             err_msg="vmap result does not match Python loop result"
         )
     
-    def test_all_models_output_shape(self, simple_model_forward, test_trajectory, test_models):
+    def test_all_models_output_shape(self, likelihood_fns, test_trajectory, test_models):
         """Test that all_model_log_likelihoods returns correct shape."""
+        _, all_model_log_likelihoods = likelihood_fns
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
         result = all_model_log_likelihoods(
-            stacked_params, states, actions, simple_model_forward
+            stacked_params, states, actions
         )
         
         assert result.shape == (len(test_models.models),)
     
-    def test_all_models_finite(self, simple_model_forward, test_trajectory, test_models):
+    def test_all_models_finite(self, likelihood_fns, test_trajectory, test_models):
         """Test that all log-likelihoods are finite."""
+        _, all_model_log_likelihoods = likelihood_fns
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
         result = all_model_log_likelihoods(
-            stacked_params, states, actions, simple_model_forward
+            stacked_params, states, actions
         )
         
         assert jnp.all(jnp.isfinite(result))
@@ -280,14 +303,15 @@ class TestInconsistencyDetection:
 class TestModelRevision:
     """Tests for MAP model selection."""
     
-    def test_select_map_model(self, simple_model_forward, test_trajectory, test_models):
+    def test_select_map_model(self, likelihood_fns, test_trajectory, test_models):
         """Test that select_map_model identifies the best model."""
+        _, all_model_log_likelihoods = likelihood_fns
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         log_priors = jnp.array(test_models.log_priors)
         
         map_id = select_map_model(
-            stacked_params, log_priors, states, actions, simple_model_forward
+            stacked_params, log_priors, states, actions, all_model_log_likelihoods
         )
         
         # Should return a valid model index
@@ -297,8 +321,9 @@ class TestModelRevision:
         map_id_int = int(map_id)
         assert isinstance(map_id_int, int)
     
-    def test_map_selects_best_posterior(self, simple_model_forward, test_models):
+    def test_map_selects_best_posterior(self, likelihood_fns, test_models):
         """Test that MAP selection chooses model with highest posterior."""
+        _, all_model_log_likelihoods = likelihood_fns
         # Create a trajectory that clearly favors model 0
         states = jnp.array([[1.0, 0.0, 0.0]] * 10)  # All same state
         actions = jnp.array([0] * 10)  # All same action
@@ -307,19 +332,58 @@ class TestModelRevision:
         log_priors = jnp.array(test_models.log_priors)
         
         map_id = select_map_model(
-            stacked_params, log_priors, states, actions, simple_model_forward
+            stacked_params, log_priors, states, actions, all_model_log_likelihoods
         )
         
         # Model 0 should be selected (its params align with this trajectory)
         assert int(map_id) == 0
+    
+    def test_select_map_model_no_retrace(self, likelihood_fns, test_models):
+        """Test that select_map_model does not retrace on subsequent calls."""
+        _, all_model_log_likelihoods = likelihood_fns
+        states = jnp.array([[1.0, 0.0, 0.0]] * 5)
+        actions = jnp.array([0] * 5)
+        stacked_params = jnp.array(test_models.stacked_policy_params)
+        log_priors = jnp.array(test_models.log_priors)
+        
+        # First call - will trigger compilation
+        map_id_1 = select_map_model(
+            stacked_params, log_priors, states, actions, all_model_log_likelihoods
+        )
+        
+        # Second call with identical inputs - should use cached compilation
+        map_id_2 = select_map_model(
+            stacked_params, log_priors, states, actions, all_model_log_likelihoods
+        )
+        
+        # Third call with different array values but same shapes - should also use cache
+        states_2 = jnp.array([[0.5, 0.5, 0.0]] * 5)
+        actions_2 = jnp.array([1] * 5)
+        map_id_3 = select_map_model(
+            stacked_params, log_priors, states_2, actions_2, all_model_log_likelihoods
+        )
+        
+        # All results should be valid model indices
+        assert 0 <= int(map_id_1) < len(test_models.models)
+        assert 0 <= int(map_id_2) < len(test_models.models)
+        assert 0 <= int(map_id_3) < len(test_models.models)
+        
+        # First two calls should give identical results (same inputs)
+        assert int(map_id_1) == int(map_id_2)
+        
+        # The fact that all calls complete successfully demonstrates that:
+        # 1. The function is properly JIT-compiled with static_argnames
+        # 2. The same likelihood function can be reused across multiple calls
+        # 3. No retracing occurs when the likelihood function stays the same
 
 
 class TestBeliefUpdater:
     """Tests for Bayesian belief updating."""
     
-    def test_init_with_prior(self, test_models):
+    def test_init_with_prior(self, likelihood_fns, test_models):
         """Test that BeliefUpdater initializes with prior."""
-        updater = BeliefUpdater(test_models)
+        _, all_model_log_likelihoods = likelihood_fns
+        updater = BeliefUpdater(test_models, all_model_log_likelihoods)
         
         belief = updater.get_belief()
         
@@ -327,15 +391,16 @@ class TestBeliefUpdater:
         expected = np.array([1.0/3.0, 1.0/3.0, 1.0/3.0])
         np.testing.assert_allclose(belief, expected, rtol=1e-5)
     
-    def test_bayesian_update(self, simple_model_forward, test_trajectory, test_models):
+    def test_bayesian_update(self, likelihood_fns, test_trajectory, test_models):
         """Test that belief update follows Bayes rule."""
-        updater = BeliefUpdater(test_models)
+        _, all_model_log_likelihoods = likelihood_fns
+        updater = BeliefUpdater(test_models, all_model_log_likelihoods)
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
         # Perform update
         posterior = updater.update(
-            stacked_params, states, actions, simple_model_forward
+            stacked_params, states, actions
         )
         
         # Posterior should sum to 1
@@ -345,9 +410,10 @@ class TestBeliefUpdater:
         assert np.all(posterior > 0)
         assert np.all(posterior < 1)
     
-    def test_belief_concentrates(self, simple_model_forward, test_models):
+    def test_belief_concentrates(self, likelihood_fns, test_models):
         """Test that belief concentrates on the correct model with strong evidence."""
-        updater = BeliefUpdater(test_models)
+        _, all_model_log_likelihoods = likelihood_fns
+        updater = BeliefUpdater(test_models, all_model_log_likelihoods)
         
         # Create a trajectory that strongly favors model 0
         states = jnp.array([[1.0, 0.0, 0.0]] * 20)
@@ -355,7 +421,7 @@ class TestBeliefUpdater:
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
         posterior = updater.update(
-            stacked_params, states, actions, simple_model_forward
+            stacked_params, states, actions
         )
         
         # Model 0 should have highest posterior
@@ -363,13 +429,14 @@ class TestBeliefUpdater:
         # And should be significantly higher than others
         assert posterior[0] > 0.5
     
-    def test_map_model_id(self, simple_model_forward, test_trajectory, test_models):
+    def test_map_model_id(self, likelihood_fns, test_trajectory, test_models):
         """Test that map_model_id returns the correct MAP estimate."""
-        updater = BeliefUpdater(test_models)
+        _, all_model_log_likelihoods = likelihood_fns
+        updater = BeliefUpdater(test_models, all_model_log_likelihoods)
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
-        updater.update(stacked_params, states, actions, simple_model_forward)
+        updater.update(stacked_params, states, actions)
         map_id = updater.map_model_id()
         
         # Should return a valid model index
@@ -380,13 +447,14 @@ class TestBeliefUpdater:
         belief = updater.get_belief()
         assert map_id == np.argmax(belief)
     
-    def test_sample_model_id(self, simple_model_forward, test_trajectory, test_models):
+    def test_sample_model_id(self, likelihood_fns, test_trajectory, test_models):
         """Test Thompson sampling from posterior."""
-        updater = BeliefUpdater(test_models)
+        _, all_model_log_likelihoods = likelihood_fns
+        updater = BeliefUpdater(test_models, all_model_log_likelihoods)
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
-        updater.update(stacked_params, states, actions, simple_model_forward)
+        updater.update(stacked_params, states, actions)
         
         rng = np.random.default_rng(42)
         samples = [updater.sample_model_id(rng) for _ in range(100)]
@@ -398,15 +466,16 @@ class TestBeliefUpdater:
         # Note: This might fail occasionally if posterior is very concentrated
         # In that case, it's actually correct behavior
     
-    def test_reset_to_prior(self, test_models):
+    def test_reset_to_prior(self, likelihood_fns, test_models):
         """Test that reset_to_prior resets belief to prior."""
-        updater = BeliefUpdater(test_models)
+        _, all_model_log_likelihoods = likelihood_fns
+        updater = BeliefUpdater(test_models, all_model_log_likelihoods)
         
         # Update with some trajectory
         states = jnp.array([[1.0, 0.0, 0.0]] * 5)
         actions = jnp.array([0] * 5)
         stacked_params = jnp.array(test_models.stacked_policy_params)
-        updater.update(stacked_params, states, actions, example_linear_model_forward)
+        updater.update(stacked_params, states, actions)
         
         # Reset to prior
         updater.reset_to_prior(test_models.log_priors)

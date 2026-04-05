@@ -89,3 +89,48 @@ class ModelSet:
     models: List[AgentModel]
     stacked_policy_params: np.ndarray
     log_priors: np.ndarray
+    
+    @classmethod
+    def from_config(cls, config):
+        """Create ModelSet from configuration (OmegaConf or dict).
+        
+        Args:
+            config: Config with 'models' list, each having 'name', 'policy_params', and 'prior'
+        
+        Returns:
+            ModelSet instance
+        """
+        models = []
+        
+        # Handle both dict and OmegaConf
+        models_list = config.models if hasattr(config, 'models') else config['models']
+        
+        for i, model_cfg in enumerate(models_list):
+            # Extract fields from either dict or OmegaConf
+            if isinstance(model_cfg, dict):
+                name = model_cfg['name']
+                policy_params = np.array(model_cfg['policy_params'])
+                prior = model_cfg['prior']
+            else:
+                name = model_cfg.name
+                policy_params = np.array(model_cfg.policy_params)
+                prior = model_cfg.prior
+            
+            model = AgentModel(
+                model_id=i,
+                name=name,
+                reward_weights=np.ones(5),  # Not used for this simple env
+                policy_params=policy_params,
+                prior=prior,
+            )
+            models.append(model)
+        
+        # Stack policy params for vmap
+        stacked_policy_params = np.stack([m.policy_params for m in models])
+        log_priors = np.log(np.array([m.prior for m in models]))
+        
+        return cls(
+            models=models,
+            stacked_policy_params=stacked_policy_params,
+            log_priors=log_priors,
+        )

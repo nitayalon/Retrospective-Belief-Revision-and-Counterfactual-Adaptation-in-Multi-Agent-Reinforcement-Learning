@@ -1,0 +1,76 @@
+# Predator-Prey Environment Configuration
+# This config trains agents in the predator-prey domain where the other agent
+# switches between evasive and territorial policies mid-episode.
+
+defaults:
+  - _self_
+
+# Environment settings
+env:
+  name: "PredatorPrey"
+  max_episode_length: 50  # Episode length for smoke test
+
+# Model set: Define the possible other-agent policies
+model_set:
+  models:
+    - name: "evasive"
+      # Policy params: [stay_pref, up_pref, down_pref, left_pref, right_pref]
+      # Low stay preference, high move preferences
+      policy_params: [0.1, 1.0, 1.0, 1.0, 1.0]
+      prior: 0.5
+      
+    - name: "territorial"
+      # Policy params: moderate stay preference, slightly lower move preferences
+      policy_params: [0.5, 0.8, 0.8, 0.8, 0.8]
+      prior: 0.5
+
+# HIM settings (Hypothesized Interaction Models)
+him:
+  ratio_mode: "delta"  # Use delta-ratio for trajectory relabeling
+  ratio_delta: 2.0     # Relabel if log-likelihood ratio > 2.0
+
+# HER settings (Hindsight Experience Replay)
+her:
+  strategy: "future"   # Sample goals from future states in trajectory
+  k: 4                 # Number of HER goals per transition
+
+# Training hyperparameters
+training:
+  total_episodes: 50              # Short run for smoke test
+  batch_size: 128                 # Batch size for gradient updates
+  buffer_capacity: 100000         # Replay buffer capacity
+  updates_per_episode: 40         # Number of updates per episode
+  
+  # Optimizer settings
+  lr_actor: 0.0003               # Learning rate for actor network
+  lr_critic: 0.001               # Learning rate for critic network
+  
+  # DDPG hyperparameters
+  gamma: 0.95                    # Discount factor
+  tau: 0.005                     # Target network soft update rate
+  alpha: 0.2                     # Entropy regularization (SAC-style)
+  
+  # Reproducibility
+  seed: 42
+
+# Agent architecture
+agent:
+  type: "him_her"  # Options: him_her, vanilla, him_only, her_only, static_model
+  
+  hidden_sizes: [256, 256]  # Hidden layer sizes for actor and critic
+  
+  # Model encoding settings
+  model_encoding:
+    embed_dim: 64              # Dimension of model embeddings
+    num_layers: 2              # Number of layers in model encoder
+    use_layer_norm: true       # Use layer normalization in encoder
+
+# Logging settings
+logging:
+  use_wandb: false             # Disable W&B for smoke test
+  project: "him-her"           # W&B project name
+  
+  # Logging intervals
+  log_interval_episodes: 10    # Log every N episodes
+  eval_interval_episodes: 50   # Evaluate every N episodes
+  save_interval_episodes: 100  # Save checkpoint every N episodes

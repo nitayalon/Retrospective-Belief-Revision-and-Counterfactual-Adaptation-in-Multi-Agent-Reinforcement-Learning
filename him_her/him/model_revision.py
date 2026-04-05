@@ -8,16 +8,14 @@ import jax
 import jax.numpy as jnp
 from typing import Callable
 
-from him_her.him.inconsistency import all_model_log_likelihoods
 
-
-@jax.jit
+@jax.jit(static_argnames=['all_model_log_likelihoods_fn'])
 def select_map_model(
     stacked_policy_params: jnp.ndarray,
     log_priors: jnp.ndarray,
     states: jnp.ndarray,
     actions: jnp.ndarray,
-    model_forward: Callable,
+    all_model_log_likelihoods_fn: Callable,
 ) -> jnp.ndarray:
     """Select the MAP (maximum a posteriori) model given trajectory.
     
@@ -28,17 +26,30 @@ def select_map_model(
         log_priors: Shape (|M|,) — log p(m) for each model
         states: Trajectory of states, shape (T, obs_dim)
         actions: Trajectory of actions, shape (T,)
-        model_forward: Task-specific function that computes logits from (params, state)
+        all_model_log_likelihoods_fn: JIT-compiled likelihood function from 
+                                      make_likelihood_fns(). This is a pre-compiled
+                                      closure with signature (stacked_params, states,
+                                      actions) and no callable arguments. Marked as
+                                      static so JAX treats it as a constant during
+                                      compilation.
     
     Returns:
         Scalar integer index into ModelSet indicating the MAP model
     
     Note:
-        This function is JIT-compiled. The returned value must be converted to a Python
-        int before passing to buffer relabeling: int(jax_scalar).
+        This function is JIT-compiled with static_argnames for the likelihood function.
+        This means the function will be compiled once per unique likelihood function,
+        and subsequent calls with the same likelihood function will reuse the cached
+        compilation. The returned value must be converted to a Python int before 
+        passing to buffer relabeling: int(jax_scalar).
+    
+    Usage:
+        >>> from him_her.him.inconsistency import make_likelihood_fns
+        >>> _, all_models_fn = make_likelihood_fns(my_model_forward)
+        >>> map_id = select_map_model(params, priors, states, actions, all_models_fn)
     """
-    log_likelihoods = all_model_log_likelihoods(
-        stacked_policy_params, states, actions, model_forward
+    log_likelihoods = all_model_log_likelihoods_fn(
+        stacked_policy_params, states, actions
     )
     log_posteriors = log_likelihoods + log_priors
     return jnp.argmax(log_posteriors)

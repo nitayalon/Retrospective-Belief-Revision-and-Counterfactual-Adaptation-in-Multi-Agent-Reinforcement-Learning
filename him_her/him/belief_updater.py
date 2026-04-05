@@ -10,7 +10,6 @@ from scipy.special import logsumexp
 from typing import Callable
 
 from him_her.models.base_model import ModelSet
-from him_her.him.inconsistency import all_model_log_likelihoods
 
 
 class BeliefUpdater:
@@ -21,24 +20,33 @@ class BeliefUpdater:
     
     Attributes:
         log_belief: NumPy array of shape (|M|,) containing log b(m) for each model
+        all_model_log_likelihoods_fn: JIT-compiled function for computing likelihoods
     """
     
-    def __init__(self, model_set: ModelSet):
+    def __init__(self, model_set: ModelSet, all_model_log_likelihoods_fn: Callable):
         """Initialize belief with prior distribution.
         
         Args:
             model_set: ModelSet containing models and their priors
+            all_model_log_likelihoods_fn: JIT-compiled likelihood function from
+                                          make_likelihood_fns(). Takes (stacked_params,
+                                          states, actions) -> log_likelihoods
+        
+        Usage:
+            >>> from him_her.him.inconsistency import make_likelihood_fns
+            >>> _, all_models_fn = make_likelihood_fns(my_model_forward)
+            >>> updater = BeliefUpdater(model_set, all_models_fn)
         """
         # Initialize belief to prior (in log-space)
         self.log_belief = model_set.log_priors.copy()  # NumPy array
         self._num_models = len(model_set.models)
+        self._all_model_log_likelihoods_fn = all_model_log_likelihoods_fn
     
     def update(
         self,
         stacked_policy_params: jnp.ndarray,
         states: jnp.ndarray,
         actions: jnp.ndarray,
-        model_forward: Callable,
     ) -> np.ndarray:
         """Perform Bayesian update given observed trajectory.
         
@@ -48,7 +56,6 @@ class BeliefUpdater:
             stacked_policy_params: Shape (|M|, param_dim) — JAX array
             states: Trajectory of states, shape (T, obs_dim) — JAX array
             actions: Trajectory of actions, shape (T,) — JAX array
-            model_forward: Task-specific function that computes logits from (params, state)
         
         Returns:
             Normalized posterior distribution as NumPy array, shape (|M|,)
@@ -58,8 +65,8 @@ class BeliefUpdater:
             The belief state (self.log_belief) remains in log-space internally.
         """
         # Compute log-likelihoods using JAX (JIT-compiled)
-        log_likelihoods = all_model_log_likelihoods(
-            stacked_policy_params, states, actions, model_forward
+        log_likelihoods = self._all_model_log_likelihoods_fn(
+            stacked_policy_params, states, actions
         )
         
         # Convert to NumPy for belief update
