@@ -14,18 +14,19 @@ env:
 model_set:
   models:
     - name: "evasive"
-      # Policy params: [stay_pref, up_pref, down_pref, left_pref, right_pref]
-      # Low stay preference, high move preferences
-      policy_params: [0.1, 1.0, 1.0, 1.0, 1.0]
+      # Policy params: [away_weight, home_weight, temperature_scale, home_x, home_y]
+      policy_params: [1.0, 0.0, 8.0, 0.0, 0.0]
       prior: 0.5
       
     - name: "territorial"
-      # Policy params: moderate stay preference, slightly lower move preferences
-      policy_params: [0.5, 0.8, 0.8, 0.8, 0.8]
+      # Policy params: [away_weight, home_weight, temperature_scale, home_x, home_y]
+      policy_params: [0.0, 1.0, 14.0, 8.0, 8.0]
       prior: 0.5
 
 # HIM settings (Hypothesized Interaction Models)
 him:
+  window_fraction: 0.2
+  threshold: -2.0      # Mean per-step log-likelihood worse than random 5-action policy
   ratio_mode: "delta"  # Use delta-ratio for trajectory relabeling
   ratio_delta: 2.0     # Relabel if log-likelihood ratio > 2.0
 
@@ -37,6 +38,9 @@ her:
 # Training hyperparameters
 training:
   total_episodes: 50              # Short run for smoke test
+  pretrain_episodes: 200          # Per-model pretraining before HIM validation
+  pretrain_mode: fixed            # fixed = no switch during pretraining
+  concurrent_training: false      # True updates policies online after pretraining
   batch_size: 128                 # Batch size for gradient updates
   buffer_capacity: 100000         # Replay buffer capacity
   updates_per_episode: 40         # Number of updates per episode

@@ -41,11 +41,22 @@ def train_state_small():
 def test_shapes(train_state_small):
     """Test that all fields in HIMHERTrainState have correct shapes and types."""
     ts = train_state_small
-    
-    # Check that actor_state has the right structure
-    assert hasattr(ts.actor_state, 'params')
-    assert hasattr(ts.actor_state, 'opt_state')
-    assert hasattr(ts.actor_state, 'apply_fn')
+
+    # Check that each model has its own TrainState with actor-shaped params.
+    assert isinstance(ts.model_policies, dict)
+    assert len(ts.model_policies) == 2
+    for model_id, policy_state in ts.model_policies.items():
+        assert model_id in (0, 1)
+        assert hasattr(policy_state, 'params')
+        assert hasattr(policy_state, 'opt_state')
+        assert hasattr(policy_state, 'apply_fn')
+        dense0_kernel = policy_state.params['params']['Dense_0']['kernel']
+        dense2_kernel = policy_state.params['params']['Dense_2']['kernel']
+        assert dense0_kernel.shape == (6, 8)
+        assert dense2_kernel.shape == (8, 2)
+
+    # Compatibility view should point at the current policy.
+    assert ts.actor_state is ts.model_policies[ts.current_model_id]
     
     # Check that critic_state has the right structure
     assert hasattr(ts.critic_state, 'params')
@@ -216,8 +227,7 @@ def test_checkpoint_roundtrip(train_state_small):
         assert restored_ts.step == 42
         assert jnp.allclose(restored_ts.log_belief, jnp.array([0.3, 0.7]))
         
-        # Verify actor_state params are preserved
-        # Check that the parameter tree structure is the same
+        # Verify all per-model actor states are preserved.
         def check_params_equal(p1, p2):
             """Recursively check that two parameter pytrees are equal."""
             leaves1 = jax.tree_util.tree_leaves(p1)
@@ -225,8 +235,13 @@ def test_checkpoint_roundtrip(train_state_small):
             assert len(leaves1) == len(leaves2)
             for l1, l2 in zip(leaves1, leaves2):
                 assert jnp.allclose(l1, l2)
-        
-        check_params_equal(restored_ts.actor_state.params, ts.actor_state.params)
+
+        assert restored_ts.model_policies.keys() == ts.model_policies.keys()
+        for model_id in ts.model_policies:
+            check_params_equal(
+                restored_ts.model_policies[model_id].params,
+                ts.model_policies[model_id].params,
+            )
         check_params_equal(restored_ts.critic_state.params, ts.critic_state.params)
         check_params_equal(restored_ts.target_critic_params, ts.target_critic_params)
         

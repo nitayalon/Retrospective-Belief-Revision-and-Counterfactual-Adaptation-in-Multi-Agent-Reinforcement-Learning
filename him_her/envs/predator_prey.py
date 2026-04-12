@@ -7,7 +7,7 @@ The other agent switches between evasive and territorial policies at a random po
 import numpy as np
 import jax.numpy as jnp
 import jax
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 from pathlib import Path
 
 from him_her.envs.base_env import BaseMultiAgentEnv
@@ -21,11 +21,13 @@ def predator_prey_model_forward(
     """Task-specific model_forward for predator-prey environment.
     
     This is the function passed to make_likelihood_fns(). It computes logits
-    over the action space as a linear function of policy_params and state features.
+    over the action space using the same hand-crafted preferences as the scripted
+    evasive and territorial policies.
     
     Args:
-        policy_params: Parameters defining the policy, shape (param_dim,)
-                      For predator-prey: shape (n_actions,) representing preference weights
+        policy_params: Parameters defining the policy, shape (5,)
+                  Layout: [away_weight, home_weight, temperature_scale,
+                  home_center_x, home_center_y]
         state: Current state observation, shape (obs_dim,)
     
     Returns:
@@ -33,36 +35,41 @@ def predator_prey_model_forward(
     
     Note:
         This is a pure JAX function with no Python control flow.
-        The logits are computed as a simple linear model for simplicity.
     """
-    # Extract relevant features from state
-    # State format: [prey_x, prey_y, predator_x, predator_y, ...]
     prey_pos = state[:2]
     predator_pos = state[2:4]
-    
-    # Compute basic features
     direction_away = prey_pos - predator_pos
+    home_center = policy_params[3:5]
+    direction_to_home = home_center - prey_pos
     
-    # Action directions (must match those in type_agents.py)
     action_directions = jnp.array([
         [0, 0],   # stay
         [0, 1],   # up
         [0, -1],  # down
         [-1, 0],  # left
         [1, 0],   # right
-    ])
-    
-    # Compute preferences as dot products with direction away from predator
-    raw_preferences = jnp.array([
-        jnp.dot(action_dir, direction_away)
-        for action_dir in action_directions
-    ])
-    
-    # Combine with policy_params (weights for each action)
-    # policy_params acts as a weighting over base preferences
-    logits = policy_params * raw_preferences
-    
-    return logits
+    ], dtype=state.dtype)
+
+    # Normalize handcrafted features by the observed coordinate scale so the
+    # likelihood model matches the scripted prey policies without saturating.
+    coordinate_scale = jnp.maximum(
+        jnp.max(jnp.abs(jnp.concatenate([prey_pos, predator_pos, home_center]))),
+        1.0,
+    )
+    feature_scale = 4.0 * coordinate_scale
+
+    away_scores = (action_directions @ direction_away) / feature_scale
+    home_scores = (action_directions @ direction_to_home) / feature_scale
+
+    away_weight = policy_params[0]
+    home_weight = policy_params[1]
+    temperature_scale = policy_params[2]
+
+    preferences = away_weight * away_scores + home_weight * home_scores
+    stay_aversion = jnp.array([-2.0, 0.0, 0.0, 0.0, 0.0], dtype=state.dtype)
+    move_tiebreak = jnp.array([0.0, 0.2, 0.0, 0.0, -0.2], dtype=state.dtype)
+    preferences = preferences + away_weight * (stay_aversion + move_tiebreak)
+    return temperature_scale * preferences
 
 
 class PredatorPreyEnv(BaseMultiAgentEnv):
@@ -90,6 +97,7 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
         max_episode_length: int = 50,
         grid_size: int = 16,
         seed: int = None,
+        fixed_policy_name: Optional[str] = None,
     ):
         """Initialize the Predator-Prey environment.
         
@@ -102,12 +110,13 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
         self.grid_size = grid_size
         self.current_step = 0
         self.switch_point = None
+        self.fixed_policy_name = fixed_policy_name
         
         # Initialize policies
-        self.evasive_policy = EvasivePolicy(temperature=0.1)
+        self.evasive_policy = EvasivePolicy(temperature=0.125)
         self.territorial_policy = TerritorialPolicy(
             home_center=np.array([grid_size / 2, grid_size / 2]),
-            temperature=0.1
+            temperature=1.0 / 14.0
         )
         self.current_policy = self.evasive_policy
         
@@ -118,6 +127,13 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
         
         # Capture distance threshold
         self.capture_distance = 1.0
+
+    def _policy_from_name(self, policy_name: str):
+        if policy_name == self.evasive_policy.name:
+            return self.evasive_policy
+        if policy_name == self.territorial_policy.name:
+            return self.territorial_policy
+        raise ValueError(f"Unknown policy_name: {policy_name}")
     
     def reset(self, seed: int = None) -> Tuple[np.ndarray, Dict]:
         """Reset the environment to initial state.
@@ -132,10 +148,13 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
         if seed is not None:
             self.rng = np.random.RandomState(seed)
         
-        # Sample switch point uniformly in [T/3, 2T/3]
-        lower = self.max_episode_length // 3
-        upper = 2 * self.max_episode_length // 3
-        self.switch_point = self.rng.randint(lower, upper + 1)
+        if self.fixed_policy_name is None:
+            # Sample switch point uniformly in [T/3, 2T/3]
+            lower = self.max_episode_length // 3
+            upper = 2 * self.max_episode_length // 3
+            self.switch_point = self.rng.randint(lower, upper + 1)
+        else:
+            self.switch_point = self.max_episode_length + 1
         
         # Reset step counter
         self.current_step = 0
@@ -144,8 +163,10 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
         self.predator_pos = self.rng.uniform(0, self.grid_size, size=2)
         self.prey_pos = self.rng.uniform(0, self.grid_size, size=2)
         
-        # Start with evasive policy
-        self.current_policy = self.evasive_policy
+        if self.fixed_policy_name is None:
+            self.current_policy = self.evasive_policy
+        else:
+            self.current_policy = self._policy_from_name(self.fixed_policy_name)
 
         # Construct observation
         obs = self._get_observation()
@@ -196,7 +217,7 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
             info: Dictionary with other_action, achieved_goal, desired_goal
         """
         # Check if we need to switch policy
-        if self.current_step == self.switch_point:
+        if self.fixed_policy_name is None and self.current_step == self.switch_point:
             # Silent switch: toggle between evasive and territorial
             if self.current_policy.name == "evasive":
                 self.current_policy = self.territorial_policy

@@ -10,7 +10,7 @@ import numpy as np
 import optax
 from flax import struct
 from flax.training.train_state import TrainState
-from typing import Any
+from typing import Any, Dict
 
 from him_her.networks.actor import Actor
 from him_her.networks.critic import Critic
@@ -35,12 +35,17 @@ class HIMHERTrainState:
         tracing it as a dynamic value. This is critical to avoid retracing the
         update_step function on every HIM trigger (see Section 15, item 5).
     """
-    actor_state: TrainState
+    model_policies: Dict[int, TrainState]
     critic_state: TrainState
     target_critic_params: Any
     log_belief: jnp.ndarray
     current_model_id: int = struct.field(pytree_node=False)
     step: int
+
+    @property
+    def actor_state(self) -> TrainState:
+        """Compatibility view of the currently selected actor state."""
+        return self.model_policies[self.current_model_id]
 
 
 def create_train_state(
@@ -91,32 +96,41 @@ def create_train_state(
     # Create network instances
     actor = Actor(hidden_sizes=hidden_sizes, action_dim=action_dim)
     critic = Critic(hidden_sizes=hidden_sizes)
-    
-    # Split RNG key for actor init, critic init, and downstream use
-    rng, actor_key, critic_key = jax.random.split(rng, 3)
+
+    num_models = int(len(log_priors))
+
+    # Split RNG key for one actor per model, the critic, and downstream use.
+    split_keys = jax.random.split(rng, num_models + 2)
+    actor_keys = split_keys[:num_models]
+    critic_key = split_keys[-2]
+    rng = split_keys[-1]
     
     # Create dummy inputs for parameter initialization
     # Note: Shape is (1, dim) with batch dimension, not just (dim,)
     dummy_obs = jnp.zeros((1, obs_dim))
     dummy_goal = jnp.zeros((1, goal_dim))
-    dummy_embed = jnp.zeros((1, model_embed_dim))
+    dummy_actor_embed = jnp.zeros((1, 0))
+    dummy_critic_embed = jnp.zeros((1, model_embed_dim))
     dummy_action = jnp.zeros((1, action_dim))
-    
-    # Initialize network parameters
-    actor_params = actor.init(actor_key, dummy_obs, dummy_goal, dummy_embed)
-    critic_params = critic.init(critic_key, dummy_obs, dummy_action, dummy_goal, dummy_embed)
+
+    # Initialize one actor policy per model. The actor is conditioned only on
+    # observation and goal; model identity is represented by policy selection.
+    model_policies = {}
+    actor_tx = optax.adam(lr_actor)
+    for model_id, actor_key in enumerate(actor_keys):
+        actor_params = actor.init(actor_key, dummy_obs, dummy_goal, dummy_actor_embed)
+        model_policies[model_id] = TrainState.create(
+            apply_fn=actor.apply,
+            params=actor_params,
+            tx=actor_tx,
+        )
+
+    critic_params = critic.init(critic_key, dummy_obs, dummy_action, dummy_goal, dummy_critic_embed)
     
     # Create optimizers
-    actor_tx = optax.adam(lr_actor)
     critic_tx = optax.adam(lr_critic)
-    
-    # Create TrainState instances for actor and critic
-    actor_state = TrainState.create(
-        apply_fn=actor.apply,
-        params=actor_params,
-        tx=actor_tx,
-    )
-    
+
+    # Create TrainState instance for the shared critic
     critic_state = TrainState.create(
         apply_fn=critic.apply,
         params=critic_params,
@@ -125,7 +139,7 @@ def create_train_state(
     
     # Initialize HIMHERTrainState
     train_state = HIMHERTrainState(
-        actor_state=actor_state,
+        model_policies=model_policies,
         critic_state=critic_state,
         target_critic_params=critic_params,  # Initialize target with same params
         log_belief=jnp.array(log_priors),

@@ -8,6 +8,12 @@ import numpy as np
 from typing import Dict, Any
 
 
+def _feature_scale(values: np.ndarray) -> float:
+    """Scale handcrafted policy features to avoid near-deterministic saturation."""
+    coordinate_scale = max(float(np.max(np.abs(values))), 1.0)
+    return 4.0 * coordinate_scale
+
+
 class EvasivePolicy:
     """Evasive policy: maximizes distance from ego agent.
     
@@ -68,6 +74,7 @@ class EvasivePolicy:
             np.dot(action_dir, direction_away)
             for action_dir in action_directions
         ])
+        preferences = preferences + np.array([-2.0, 0.2, 0.0, 0.0, -0.2], dtype=np.float32)
         
         return preferences
     
@@ -81,7 +88,7 @@ class EvasivePolicy:
             Array of shape (n_actions,) with log-probabilities summing to 1
         """
         preferences = self.get_action_preferences(state)
-        logits = preferences / self.temperature
+        logits = (preferences / _feature_scale(state[:4])) / self.temperature
         # Log-softmax for numerical stability
         log_probs = logits - np.log(np.sum(np.exp(logits)))
         return log_probs
@@ -174,7 +181,8 @@ class TerritorialPolicy:
             Array of shape (n_actions,) with log-probabilities
         """
         preferences = self.get_action_preferences(state)
-        logits = preferences / self.temperature
+        scale_inputs = np.concatenate([state[:4], self.home_center])
+        logits = (preferences / _feature_scale(scale_inputs)) / self.temperature
         log_probs = logits - np.log(np.sum(np.exp(logits)))
         return log_probs
     

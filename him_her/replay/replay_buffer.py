@@ -107,6 +107,15 @@ class ReplayBuffer:
             "goals": self.goals[indices],
             "model_ids": self.model_ids[indices],
         }
+
+    def relabel_episode(self, episode_start_idx: int, episode_length: int, new_model_id: int) -> None:
+        """Relabel the model_id for a contiguous episode segment in-place."""
+        if episode_length <= 0 or self.size == 0:
+            return
+
+        for offset in range(episode_length):
+            idx = (episode_start_idx + offset) % self.capacity
+            self.model_ids[idx] = new_model_id
     
     def __len__(self) -> int:
         """Return current buffer size."""

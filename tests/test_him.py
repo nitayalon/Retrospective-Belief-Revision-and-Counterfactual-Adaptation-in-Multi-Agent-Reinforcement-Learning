@@ -142,28 +142,28 @@ class TestTrajectoryLogLikelihood:
     """Tests for trajectory log-likelihood computation."""
     
     def test_trajectory_likelihood(self, likelihood_fns, test_trajectory):
-        """Test trajectory_log_likelihood computes sum of log-probs."""
-        trajectory_log_likelihood, _ = likelihood_fns
+        """Test current-model likelihood computes mean log-prob per step."""
+        current_model_log_likelihood, _ = likelihood_fns
         states, actions = test_trajectory
         policy_params = jnp.array([[1.0, 0.0, 0.0],
                                    [0.0, 1.0, 0.0],
                                    [0.0, 0.0, 1.0]])
         
-        log_lik = trajectory_log_likelihood(policy_params, states, actions)
+        log_lik = current_model_log_likelihood(policy_params, states, actions)
         
-        # Should be finite and negative (sum of log-probs)
+        # Should be finite and negative (mean of per-step log-probs)
         assert jnp.isfinite(log_lik)
         assert log_lik < 0.0
     
     def test_trajectory_likelihood_shape(self, likelihood_fns, test_trajectory):
-        """Test that trajectory_log_likelihood returns a scalar."""
-        trajectory_log_likelihood, _ = likelihood_fns
+        """Test that current-model likelihood returns a scalar."""
+        current_model_log_likelihood, _ = likelihood_fns
         states, actions = test_trajectory
         policy_params = jnp.array([[1.0, 0.5, 0.3],
                                    [0.3, 1.0, 0.5],
                                    [0.5, 0.3, 1.0]])
         
-        log_lik = trajectory_log_likelihood(policy_params, states, actions)
+        log_lik = current_model_log_likelihood(policy_params, states, actions)
         
         assert log_lik.shape == ()  # Scalar
 
@@ -172,21 +172,23 @@ class TestAllModelLogLikelihoods:
     """Tests for vectorized computation over all models."""
     
     def test_vmap_vs_loop(self, likelihood_fns, test_trajectory, test_models):
-        """CRITICAL TEST: Verify vmap gives identical results to Python loop."""
-        trajectory_log_likelihood, all_model_log_likelihoods = likelihood_fns
+        """CRITICAL TEST: Verify all-model vmap matches summed log-probs from a loop."""
+        _, all_model_log_likelihoods = likelihood_fns
         states, actions = test_trajectory
         stacked_params = jnp.array(test_models.stacked_policy_params)
         
         # Compute using vmap (vectorized)
         vmap_result = all_model_log_likelihoods(
-            stacked_params, states, actions
+            stacked_params, states, actions, window_fraction=1.0
         )
         
         # Compute using Python loop for comparison
         loop_results = []
         for i in range(len(test_models.models)):
             params = stacked_params[i]
-            log_lik = trajectory_log_likelihood(params, states, actions)
+            logits = jax.vmap(lambda s: example_linear_model_forward(params, s))(states)
+            log_probs = jax.nn.log_softmax(logits, axis=-1)
+            log_lik = jnp.sum(log_probs[jnp.arange(actions.shape[0]), actions])
             loop_results.append(float(log_lik))
         loop_results = np.array(loop_results)
         

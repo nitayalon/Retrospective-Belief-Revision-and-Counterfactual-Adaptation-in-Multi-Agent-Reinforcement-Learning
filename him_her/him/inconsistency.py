@@ -10,6 +10,7 @@ factory pattern via make_likelihood_fns(). This returns closures with model_forw
 
 import jax
 import jax.numpy as jnp
+from functools import partial
 from typing import Callable, Tuple
 
 
@@ -60,58 +61,109 @@ def make_likelihood_fns(model_forward: Callable) -> Tuple[Callable, Callable]:
         # For discrete actions: index into log_probs
         # action is assumed to be an integer index
         return log_probs[jnp.int32(action)]
-    
-    @jax.jit
-    def trajectory_log_likelihood_fn(
+
+    def _trajectory_log_prob_sum(
         policy_params: jnp.ndarray,
         states: jnp.ndarray,
         actions: jnp.ndarray,
     ) -> jnp.ndarray:
-        """Compute log L(m | tau) = sum_t log pi_o^m(a^o_t | s_t).
-        
-        Uses vmap to vectorize over the timestep dimension.
-        
-        Args:
-            policy_params: Parameters defining the other agent's policy
-            states: Trajectory of states, shape (T, obs_dim)
-            actions: Trajectory of actions, shape (T,)
-        
-        Returns:
-            Log-likelihood of the trajectory under the model (scalar)
-        """
-        # vmap over timesteps: policy_params is constant, states and actions are batched
         log_probs = jax.vmap(
             lambda s, a: single_step_log_prob(policy_params, s, a),
             in_axes=(0, 0)
         )(states, actions)
         return jnp.sum(log_probs)
+
+    def _window_slice(
+        states: jnp.ndarray,
+        actions: jnp.ndarray,
+        window_fraction: float,
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        if not 0.0 < window_fraction <= 1.0:
+            raise ValueError(f"window_fraction must be in (0, 1], got {window_fraction}")
+
+        trajectory_length = states.shape[0]
+        start = int(trajectory_length * (1.0 - window_fraction))
+        start = max(0, min(start, trajectory_length - 1))
+        return states[start:], actions[start:]
     
-    @jax.jit
-    def all_model_log_likelihoods_fn(
+    @partial(jax.jit, static_argnames=['window_fraction'])
+    def current_model_log_likelihood(
+        policy_params: jnp.ndarray,
+        states: jnp.ndarray,
+        actions: jnp.ndarray,
+        window_fraction: float = 0.5,
+    ) -> jnp.ndarray:
+        """Compute the current model log-likelihood over a recent trajectory window.
+        
+        This is the cheap monitoring path used every episode before any full
+        model-set comparison is needed.
+        
+        Args:
+            policy_params: Parameters defining the other agent's policy
+            states: Trajectory of states, shape (T, obs_dim)
+            actions: Trajectory of actions, shape (T,)
+            window_fraction: Fraction of final trajectory steps to evaluate
+        
+        Returns:
+            Mean log-likelihood per step under the model (scalar)
+        """
+        states_window, actions_window = _window_slice(states, actions, window_fraction)
+
+        len_window = states_window.shape[0]
+        log_prob_sum = _trajectory_log_prob_sum(policy_params, states_window, actions_window)
+        return log_prob_sum / jnp.maximum(len_window, 1)
+    
+    @partial(jax.jit, static_argnames=['window_fraction'])
+    def all_model_log_likelihoods_windowed(
         stacked_policy_params: jnp.ndarray,
         states: jnp.ndarray,
         actions: jnp.ndarray,
+        window_fraction: float = 0.5,
     ) -> jnp.ndarray:
-        """Compute log L(m | tau) for ALL models simultaneously via vmap.
+        """Compute log-likelihoods for all models over a recent trajectory window.
         
-        This is the key function that enables efficient evaluation of all models in the
-        hypothesis set without a Python loop.
+        This is the expensive model-selection path, intended to run only after an
+        inconsistency signal indicates that the current assumed model may be wrong.
         
         Args:
             stacked_policy_params: Shape (|M|, param_dim) — all model parameters stacked
             states: Trajectory of states, shape (T, obs_dim)
             actions: Trajectory of actions, shape (T,)
+            window_fraction: Fraction of final trajectory steps to evaluate
         
         Returns:
             Log-likelihoods for all models, shape (|M|,)
         """
+        states_window, actions_window = _window_slice(states, actions, window_fraction)
+
         # vmap over models: states and actions are constant, policy_params is batched
         return jax.vmap(
-            lambda params: trajectory_log_likelihood_fn(params, states, actions),
+            lambda params: _trajectory_log_prob_sum(params, states_window, actions_window),
             in_axes=(0,)
         )(stacked_policy_params)
     
-    return trajectory_log_likelihood_fn, all_model_log_likelihoods_fn
+    return current_model_log_likelihood, all_model_log_likelihoods_windowed
+
+
+def compute_him_likelihood(
+    stacked_policy_params: jnp.ndarray,
+    states: jnp.ndarray,
+    actions: jnp.ndarray,
+    window_fraction: float = 0.5,
+    *,
+    all_model_log_likelihoods_fn: Callable,
+) -> jnp.ndarray:
+    """Compute model likelihoods using only the final fraction of a trajectory.
+
+    This focuses HIM on recent behavior in mixed-policy episodes, where the start
+    of the trajectory may reflect an outdated model.
+    """
+    return all_model_log_likelihoods_fn(
+        stacked_policy_params,
+        states,
+        actions,
+        window_fraction=window_fraction,
+    )
 
 
 @jax.jit

@@ -46,6 +46,7 @@ class VanillaAgent:
         self.env = env
         self.model_set = model_set
         self.config = config
+        self.np_rng = np.random.RandomState(config.training.seed)
         
         # Extract dimensions
         # For predator-prey: obs = [predator_x, predator_y, prey_x, prey_y] = 4D
@@ -55,10 +56,8 @@ class VanillaAgent:
         self.action_dim = 5
         self.goal_dim = 2  # Goal is prey position
         
-        # Model encoding dimension from config
-        self.model_embed_dim = config.agent.model_encoding.embed_dim
-        
-        # Create zero model embedding (no model conditioning)
+        # Vanilla policies are conditioned only on observation and goal.
+        self.model_embed_dim = 0
         self.zero_embed = np.zeros(self.model_embed_dim, dtype=np.float32)
         
         # Initialize replay buffer
@@ -72,6 +71,21 @@ class VanillaAgent:
         # Initialize networks and training state
         self.rng = jax.random.PRNGKey(config.training.seed)
         self._init_networks()
+
+    def _goal_directed_action(self, obs: np.ndarray, goal: np.ndarray) -> int:
+        """Choose the action that most directly moves the predator toward the goal."""
+        predator_pos = obs[:2]
+        delta = goal - predator_pos
+
+        if abs(delta[0]) > abs(delta[1]):
+            return 4 if delta[0] > 0 else 3
+        if abs(delta[1]) > 1e-6:
+            return 1 if delta[1] > 0 else 2
+        return 0
+
+    def _heuristic_action_probability(self) -> float:
+        """Decay heuristic guidance as the actor accumulates gradient updates."""
+        return max(0.15, 1.0 - (self.train_state.step / 500.0))
         
     def _init_networks(self):
         """Initialize actor, critic networks and training state."""
@@ -111,8 +125,9 @@ class VanillaAgent:
         embed_jax = jnp.array(self.zero_embed).reshape(1, -1)
         
         # Get action distribution from actor (returns mean, log_std for continuous control)
-        action_mean, action_log_std = self.actor.apply(
-            self.train_state.actor_state.params,
+        current_policy_state = self.train_state.model_policies[self.train_state.current_model_id]
+        action_mean, action_log_std = current_policy_state.apply_fn(
+            current_policy_state.params,
             obs_jax,
             goal_jax,
             embed_jax,
@@ -120,13 +135,16 @@ class VanillaAgent:
         
         # Convert to NumPy and flatten - use mean as logits for discrete actions
         action_logits = np.array(action_mean).flatten()
+
+        if explore and self.np_rng.rand() < self._heuristic_action_probability():
+            return self._goal_directed_action(obs, goal)
         
         # Select discrete action
         if explore:
             # Sample from softmax distribution for exploration
             probs = np.exp(action_logits - np.max(action_logits))  # Subtract max for numerical stability
             probs = probs / np.sum(probs)
-            action = np.random.choice(self.action_dim, p=probs)
+            action = self.np_rng.choice(self.action_dim, p=probs)
         else:
             # Greedy: select argmax
             action = int(np.argmax(action_logits))
@@ -160,7 +178,7 @@ class VanillaAgent:
             # Sample k future states as alternative goals
             future_indices = list(range(i + 1, episode_length))
             num_samples = min(k, len(future_indices))
-            sampled_indices = np.random.choice(future_indices, size=num_samples, replace=False)
+            sampled_indices = self.np_rng.choice(future_indices, size=num_samples, replace=False)
             
             for idx in sampled_indices:
                 # New goal is prey position from future state (indices 2:4 of observation)
@@ -190,6 +208,8 @@ class VanillaAgent:
         Args:
             num_episodes: Number of episodes to train for
         """
+        episode_rewards = []
+
         for episode in range(num_episodes):
             # Reset environment
             obs, info = self.env.reset()
@@ -221,8 +241,10 @@ class VanillaAgent:
                 obs = next_obs
             
             # Apply HER goal relabeling
-            # TEMPORARILY DISABLED FOR DEBUGGING
-            her_transitions = []  # self._apply_her_relabeling(episode_transitions, k=self.config.her.k)
+            her_transitions = self._apply_her_relabeling(
+                episode_transitions,
+                k=self.config.her.k,
+            )
             
             # Add all transitions to replay buffer (original + HER relabeled)
             for trans in episode_transitions + her_transitions:
@@ -244,10 +266,14 @@ class VanillaAgent:
             if len(self.replay_buffer) >= self.config.training.batch_size:
                 for _ in range(self.config.training.updates_per_episode):
                     self._update_networks()
+
+            episode_rewards.append(float(episode_reward))
             
             # Log progress
             if (episode + 1) % 10 == 0:
                 print(f"Episode {episode + 1}/{num_episodes}, Reward: {episode_reward:.3f}, Buffer size: {len(self.replay_buffer)}")
+
+        return episode_rewards
     
     def _update_networks(self):
         """Sample batch and update actor-critic networks."""
@@ -265,12 +291,71 @@ class VanillaAgent:
         # Create zero embeddings for entire batch
         batch_size = states.shape[0]
         zero_embeds = jnp.zeros((batch_size, self.model_embed_dim))
-        
-        # TODO: Implement actual DDPG update logic here
-        # For smoke test, we just verify the pipeline runs
-        # Real implementation would:
-        # 1. Compute Q-targets using target networks
-        # 2. Update critic to minimize Bellman error
-        # 3. Update actor to maximize Q-values
-        # 4. Soft-update target networks
-        pass
+        current_model_id = self.train_state.current_model_id
+        current_policy_state = self.train_state.model_policies[current_model_id]
+
+        def critic_loss_fn(critic_params):
+            next_logits, _ = current_policy_state.apply_fn(
+                current_policy_state.params,
+                next_states,
+                goals,
+                zero_embeds,
+            )
+            next_actions = jax.nn.softmax(next_logits, axis=-1)
+            target_q1, target_q2 = self.train_state.critic_state.apply_fn(
+                self.train_state.target_critic_params,
+                next_states,
+                next_actions,
+                goals,
+                zero_embeds,
+            )
+            target_q = jnp.minimum(target_q1, target_q2).squeeze(-1)
+            td_target = rewards + self.config.training.gamma * (1.0 - dones) * target_q
+
+            q1, q2 = self.train_state.critic_state.apply_fn(
+                critic_params,
+                states,
+                actions,
+                goals,
+                zero_embeds,
+            )
+            q1 = q1.squeeze(-1)
+            q2 = q2.squeeze(-1)
+            return jnp.mean((q1 - td_target) ** 2 + (q2 - td_target) ** 2)
+
+        critic_grads = jax.grad(critic_loss_fn)(self.train_state.critic_state.params)
+        critic_state = self.train_state.critic_state.apply_gradients(grads=critic_grads)
+
+        def actor_loss_fn(actor_params):
+            action_logits, _ = current_policy_state.apply_fn(
+                actor_params,
+                states,
+                goals,
+                zero_embeds,
+            )
+            action_probs = jax.nn.softmax(action_logits, axis=-1)
+            q1, q2 = critic_state.apply_fn(
+                critic_state.params,
+                states,
+                action_probs,
+                goals,
+                zero_embeds,
+            )
+            return -jnp.mean(jnp.minimum(q1, q2))
+
+        actor_grads = jax.grad(actor_loss_fn)(current_policy_state.params)
+        actor_state = current_policy_state.apply_gradients(grads=actor_grads)
+        target_critic_params = optax.incremental_update(
+            critic_state.params,
+            self.train_state.target_critic_params,
+            self.config.training.tau,
+        )
+        model_policies = dict(self.train_state.model_policies)
+        model_policies[current_model_id] = actor_state
+
+        self.train_state = self.train_state.replace(
+            model_policies=model_policies,
+            critic_state=critic_state,
+            target_critic_params=target_critic_params,
+            step=self.train_state.step + 1,
+        )
