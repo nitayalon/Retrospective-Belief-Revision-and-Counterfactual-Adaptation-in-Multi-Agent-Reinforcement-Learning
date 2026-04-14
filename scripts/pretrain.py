@@ -23,7 +23,7 @@ def main() -> None:
     checkpoints_root = (PROJECT_ROOT / "checkpoints").resolve()
     checkpointer = ocp.PyTreeCheckpointer()
 
-    print("=" * 60)
+    print("="    * 60)
     print("HIM-HER Policy Pretraining")
     print("=" * 60)
     print(f"Pretrain episodes: {config.training.pretrain_episodes}")

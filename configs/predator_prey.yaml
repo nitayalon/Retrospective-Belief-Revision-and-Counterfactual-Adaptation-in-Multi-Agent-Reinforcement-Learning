@@ -25,7 +25,8 @@ model_set:
 
 # HIM settings (Hypothesized Interaction Models)
 him:
-  window_fraction: 0.2
+  window_fraction: 0.5
+  warmup_episodes: 20
   threshold: -2.0      # Mean per-step log-likelihood worse than random 5-action policy
   ratio_mode: "delta"  # Use delta-ratio for trajectory relabeling
   ratio_delta: 2.0     # Relabel if log-likelihood ratio > 2.0
@@ -56,6 +57,8 @@ training:
   
   # Reproducibility
   seed: 42
+  pretrain: true        # true = load pretrained checkpoints, false = train from scratch
+  pretrain_episodes: 0  # ignored when pretrain: false
 
 # Agent architecture
 agent:
@@ -77,4 +80,5 @@ logging:
   # Logging intervals
   log_interval_episodes: 10    # Log every N episodes
   eval_interval_episodes: 50   # Evaluate every N episodes
+  verbose: false               # true = print per-gradient-step HER metrics
   save_interval_episodes: 100  # Save checkpoint every N episodes

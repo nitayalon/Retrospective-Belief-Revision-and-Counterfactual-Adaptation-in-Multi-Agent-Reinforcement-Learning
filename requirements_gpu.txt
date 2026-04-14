@@ -1,0 +1,20 @@
+# GPU-enabled requirements for cluster training.
+# Install with: pip install -r requirements_gpu.txt
+#
+# The base requirements.txt covers CPU-only packages.
+# This file adds CUDA-enabled JAX and GPU utilities.
+
+# === Base requirements (keep in sync with requirements.txt) ===
+-r requirements.txt
+
+# === GPU / CUDA overrides ===
+# Replace the CPU jax[cpu] with GPU jax[cuda12].
+# Uninstall jaxlib first if using pip: pip install --upgrade "jax[cuda12]"
+# (CUDA 12 is the most widely supported version at AAAI 2027 compute centres.)
+jax[cuda12]>=0.4.26
+jaxlib[cuda12_pip]>=0.4.26; sys_platform != "darwin"
+
+# === Monitoring & profiling ===
+wandb>=0.17.0              # experiment tracking
+nvitop>=1.3.0              # GPU utilisation monitoring
+py-spy>=0.3.14             # CPU profiler

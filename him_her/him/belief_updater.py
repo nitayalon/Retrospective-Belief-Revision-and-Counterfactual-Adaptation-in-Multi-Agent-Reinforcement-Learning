@@ -38,7 +38,8 @@ class BeliefUpdater:
             >>> updater = BeliefUpdater(model_set, all_models_fn)
         """
         # Initialize belief to prior (in log-space)
-        self.log_belief = model_set.log_priors.copy()  # NumPy array
+        self.log_priors = model_set.log_priors.copy()  # NumPy array — kept for reset
+        self.log_belief = self.log_priors.copy()
         self._num_models = len(model_set.models)
         self._all_model_log_likelihoods_fn = all_model_log_likelihoods_fn
     
@@ -77,7 +78,12 @@ class BeliefUpdater:
         
         # Normalize using logsumexp for numerical stability
         self.log_belief = log_unnorm - logsumexp(log_unnorm)
-        
+
+        assert np.all(np.isfinite(self.log_belief)), \
+            f"Log-belief contains non-finite values: {self.log_belief}"
+        assert abs(np.exp(self.log_belief).sum() - 1.0) < 1e-6, \
+            "Belief does not sum to 1"
+
         # Return normalized posterior (exponentiated)
         return np.exp(self.log_belief)
     
@@ -122,13 +128,17 @@ class BeliefUpdater:
         belief = np.exp(self.log_belief)
         return int(rng.choice(self._num_models, p=belief))
     
-    def reset_to_prior(self, log_priors: np.ndarray) -> None:
+    def reset_to_prior(self, log_priors: np.ndarray = None) -> None:
         """Reset belief to prior distribution.
-        
+
         Args:
-            log_priors: Log-prior distribution, shape (|M|,)
-        
+            log_priors: Log-prior distribution, shape (|M|,). If None, uses the
+                        priors stored at construction time.
+
         Note:
-            Useful for episodic resets in some experimental settings.
+            Useful for episodic resets in non-stationary environments. Call at
+            the start of each episode so the update uses only that episode's data.
         """
+        if log_priors is None:
+            log_priors = self.log_priors
         self.log_belief = log_priors.copy()

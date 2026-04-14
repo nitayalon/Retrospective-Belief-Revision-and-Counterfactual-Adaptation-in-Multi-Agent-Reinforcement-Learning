@@ -1,0 +1,1 @@
+run_id,episode,him_trigger_step,him_trigger_episode_step_fraction,old_model_id,new_model_id,log_lik_at_trigger,log_lik_ratio_at_trigger,switch_point,episode_reward

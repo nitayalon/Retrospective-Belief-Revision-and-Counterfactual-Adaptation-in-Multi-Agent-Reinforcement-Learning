@@ -7,7 +7,7 @@ The other agent switches between evasive and territorial policies at a random po
 import numpy as np
 import jax.numpy as jnp
 import jax
-from typing import Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional
 from pathlib import Path
 
 from him_her.envs.base_env import BaseMultiAgentEnv
@@ -128,6 +128,30 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
         # Capture distance threshold
         self.capture_distance = 1.0
 
+    @property
+    def current_policy_name(self) -> str:
+        return self.current_policy.name
+
+    @property
+    def true_model_id(self) -> int:
+        """Ground truth: which model is currently active (0=evasive, 1=territorial)."""
+        if self.switch_point is None:
+            return 0
+        return 1 if self.current_step >= self.switch_point else 0
+
+    @property
+    def true_model_name(self) -> str:
+        """Name of the currently active ground-truth policy."""
+        return "territorial" if self.true_model_id == 1 else "evasive"
+
+    def _get_ego_pos(self) -> List[float]:
+        """Return predator (ego) position as a Python float list."""
+        return [float(self.predator_pos[0]), float(self.predator_pos[1])]
+
+    def _get_other_pos(self) -> List[float]:
+        """Return prey (other) position as a Python float list."""
+        return [float(self.prey_pos[0]), float(self.prey_pos[1])]
+
     def _policy_from_name(self, policy_name: str):
         if policy_name == self.evasive_policy.name:
             return self.evasive_policy
@@ -176,6 +200,10 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
             "initial_policy": self.current_policy.name,
             "achieved_goal": self.prey_pos.copy(),
             "desired_goal": self.prey_pos.copy(),
+            "ego_pos": self._get_ego_pos(),
+            "other_pos": self._get_other_pos(),
+            "true_model_id": self.true_model_id,
+            "true_model_name": self.true_model_name,
         }
 
         return obs, info
@@ -258,6 +286,10 @@ class PredatorPreyEnv(BaseMultiAgentEnv):
             "desired_goal": self.prey_pos.copy(),  # In this simple version, goal = prey position
             "distance": distance,
             "current_policy": self.current_policy.name,
+            "ego_pos": self._get_ego_pos(),
+            "other_pos": self._get_other_pos(),
+            "true_model_id": self.true_model_id,
+            "true_model_name": self.true_model_name,
         }
         
         return next_obs, reward, terminated, truncated, info

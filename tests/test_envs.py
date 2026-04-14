@@ -10,6 +10,18 @@ import jax
 import jax.numpy as jnp
 
 from him_her.envs.predator_prey import PredatorPreyEnv, predator_prey_model_forward
+from him_her.envs.cooperative_nav import (
+    CooperativeNavEnv,
+    cooperative_nav_model_forward,
+)
+from him_her.envs.intersection import (
+    IntersectionEnv,
+    intersection_model_forward,
+)
+from him_her.envs.hide_and_seek import (
+    HideAndSeekEnv,
+    hide_and_seek_model_forward,
+)
 from him_her.models.base_model import AgentModel
 
 
@@ -204,3 +216,198 @@ def test_reward_is_binary():
             break
     
     assert len(rewards) > 0, "No rewards collected"
+
+
+# ---------------------------------------------------------------------------
+# Cooperative Navigation tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def coop_nav_env():
+    return CooperativeNavEnv(max_episode_length=50, seed=42)
+
+
+def test_coop_nav_reset_shapes(coop_nav_env):
+    """CooperativeNavEnv reset() returns correct obs shape and info keys."""
+    obs, info = coop_nav_env.reset(seed=0)
+    assert obs.dtype == np.float32
+    assert obs.ndim == 1
+    assert "switch_point" in info
+    assert "initial_policy" in info
+    assert "achieved_goal" in info
+    assert "desired_goal" in info
+
+
+def test_coop_nav_info_keys(coop_nav_env):
+    """CooperativeNavEnv step() returns required info keys for 20 steps."""
+    coop_nav_env.reset(seed=0)
+    for _ in range(20):
+        action = int(np.random.randint(0, 5))
+        obs, reward, terminated, truncated, info = coop_nav_env.step(action)
+        assert "other_action" in info
+        assert "achieved_goal" in info
+        assert "desired_goal" in info
+        if terminated or truncated:
+            break
+
+
+def test_coop_nav_reward_jax_matches_numpy(coop_nav_env):
+    """CooperativeNavEnv compute_reward_jax agrees with compute_reward."""
+    dummy_model = AgentModel(
+        model_id=0,
+        name="uniform",
+        reward_weights=np.ones(5),
+        policy_params=np.array([0.0, 1.0]),
+        prior=0.5,
+    )
+    rng = np.random.RandomState(7)
+    for _ in range(10):
+        state = rng.randn(4).astype(np.float32)
+        goal = rng.randn(2).astype(np.float32)
+        ego_action = rng.randint(0, 5)
+        r_np = coop_nav_env.compute_reward(state, ego_action, goal, dummy_model)
+        r_jax = float(
+            coop_nav_env.compute_reward_jax(
+                jnp.array(state), jnp.array(ego_action), jnp.array(goal)
+            )
+        )
+        assert abs(r_np - r_jax) < 1e-5, f"NumPy {r_np} != JAX {r_jax}"
+
+
+def test_coop_nav_model_forward_pure_jax():
+    """cooperative_nav_model_forward compiles under jax.jit."""
+    jitted = jax.jit(cooperative_nav_model_forward)
+    params = jnp.array([2.0, 4.0])
+    state = jnp.array([0.1, 0.2, 1.0, 1.0])
+    logits = jitted(params, state)
+    assert logits.shape == (5,)
+    assert jnp.all(jnp.isfinite(logits))
+
+
+# ---------------------------------------------------------------------------
+# Intersection tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def intersection_env():
+    return IntersectionEnv(max_episode_length=30, seed=42)
+
+
+def test_intersection_reset_shapes(intersection_env):
+    """IntersectionEnv reset() returns obs as 1-D float32 array."""
+    obs, info = intersection_env.reset(seed=0)
+    assert obs.dtype == np.float32
+    assert obs.ndim == 1
+    assert "switch_point" in info
+    assert "initial_policy" in info
+    assert "achieved_goal" in info
+
+
+def test_intersection_info_keys(intersection_env):
+    """IntersectionEnv step() returns required info keys for 10 steps."""
+    intersection_env.reset(seed=0)
+    for _ in range(10):
+        obs, reward, terminated, truncated, info = intersection_env.step(2)
+        assert "other_action" in info
+        assert "achieved_goal" in info
+        assert "desired_goal" in info
+        if terminated or truncated:
+            break
+
+
+def test_intersection_reward_jax_matches_numpy(intersection_env):
+    """IntersectionEnv compute_reward_jax agrees with compute_reward."""
+    dummy_model = AgentModel(
+        model_id=0,
+        name="aggressive",
+        reward_weights=np.ones(5),
+        policy_params=np.array([2.0, 0.0, 4.0]),
+        prior=0.333,
+    )
+    rng = np.random.RandomState(99)
+    obs, _ = intersection_env.reset(seed=0)
+    for _ in range(5):
+        state = rng.randn(4).astype(np.float32)
+        goal = rng.randn(2).astype(np.float32)
+        ego_action = rng.randint(0, 5)
+        r_np = intersection_env.compute_reward(state, ego_action, goal, dummy_model)
+        r_jax = float(
+            intersection_env.compute_reward_jax(
+                jnp.array(state), jnp.array(ego_action), jnp.array(goal)
+            )
+        )
+        assert abs(r_np - r_jax) < 1e-5, f"NumPy {r_np} != JAX {r_jax}"
+
+
+def test_intersection_model_forward_pure_jax():
+    """intersection_model_forward compiles under jax.jit."""
+    jitted = jax.jit(intersection_model_forward)
+    params = jnp.array([2.0, 0.0, 4.0])
+    state = jnp.array([0.1, 0.2, 0.5, 0.5])
+    logits = jitted(params, state)
+    assert logits.shape == (5,)
+    assert jnp.all(jnp.isfinite(logits))
+
+
+# ---------------------------------------------------------------------------
+# Hide-and-Seek tests
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def hide_and_seek_env():
+    return HideAndSeekEnv(max_episode_length=30, seed=42)
+
+
+def test_hide_and_seek_reset_shapes(hide_and_seek_env):
+    """HideAndSeekEnv reset() returns 1-D float32 obs and required info keys."""
+    obs, info = hide_and_seek_env.reset(seed=0)
+    assert obs.dtype == np.float32
+    assert obs.ndim == 1
+    assert "switch_point" in info
+    assert "initial_policy" in info
+    assert "achieved_goal" in info
+
+
+def test_hide_and_seek_info_keys(hide_and_seek_env):
+    """HideAndSeekEnv step() returns required info keys for 10 steps."""
+    hide_and_seek_env.reset(seed=0)
+    for _ in range(10):
+        obs, reward, terminated, truncated, info = hide_and_seek_env.step(0)
+        assert "other_action" in info
+        assert "achieved_goal" in info
+        assert "desired_goal" in info
+        if terminated or truncated:
+            break
+
+
+def test_hide_and_seek_reward_jax_matches_numpy(hide_and_seek_env):
+    """HideAndSeekEnv compute_reward_jax agrees with compute_reward."""
+    dummy_model = AgentModel(
+        model_id=0,
+        name="direct",
+        reward_weights=np.ones(5),
+        policy_params=np.array([0.0, 2.0, 4.0]),
+        prior=0.333,
+    )
+    rng = np.random.RandomState(55)
+    for _ in range(10):
+        state = rng.randn(4).astype(np.float32)
+        goal = rng.randn(2).astype(np.float32)
+        ego_action = rng.randint(0, 5)
+        r_np = hide_and_seek_env.compute_reward(state, ego_action, goal, dummy_model)
+        r_jax = float(
+            hide_and_seek_env.compute_reward_jax(
+                jnp.array(state), jnp.array(ego_action), jnp.array(goal)
+            )
+        )
+        assert abs(r_np - r_jax) < 1e-5, f"NumPy {r_np} != JAX {r_jax}"
+
+
+def test_hide_and_seek_model_forward_pure_jax():
+    """hide_and_seek_model_forward compiles under jax.jit."""
+    jitted = jax.jit(hide_and_seek_model_forward)
+    params = jnp.array([0.0, 2.0, 4.0])
+    state = jnp.array([0.1, 0.2, 1.0, 1.0])
+    logits = jitted(params, state)
+    assert logits.shape == (5,)
+    assert jnp.all(jnp.isfinite(logits))
