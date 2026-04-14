@@ -10,11 +10,11 @@ echo ""
 
 echo "=== Completed logs (last 20) ==="
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LOG_DIR="$PROJECT_DIR/logs/slurm"
+LOG_DIR="$PROJECT_DIR/slurm_logs"
 if [[ -d "$LOG_DIR" ]]; then
     ls -lt "$LOG_DIR"/*.out 2>/dev/null | head -20 || echo "  (no log files yet)"
 else
-    echo "  (no logs/slurm/ directory yet)"
+    echo "  (no slurm_logs/ directory yet)"
 fi
 
 echo ""

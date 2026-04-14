@@ -1,47 +1,58 @@
-#!/bin/bash
-# SLURM job script — single seed of one experiment configuration.
-# Submitted indirectly via submit_single.sh / submit_all.sh.
-#
+#!/bin/bash -l
+#SBATCH -o ./slurm_logs/himher_%x_%A_%a.out
+#SBATCH -e ./slurm_logs/himher_%x_%A_%a.err
+#SBATCH -D ./
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:1
+#SBATCH --cpus-per-task=4
+#SBATCH --mem=32G
+#SBATCH --mail-type=END,FAIL
+#SBATCH --mail-user=nitay.alon@tuebingen.mpg.de
+#SBATCH --time=3-00:00:00
+#SBATCH --job-name=himher
+
+# ============================================================================
+# HIM-HER EXPERIMENT — single (agent_type, seed) run
+# ============================================================================
 # Required environment variables (exported by the submitter):
 #   AGENT_TYPE   — one of: him_her, him_only, vanilla, bayesian, static
-#   SEED         — integer seed (0-9 for full job arrays, or arbitrary)
-#   TOTAL_EPS    — total number of training episodes
+#   TOTAL_EPS    — total number of training episodes (default: 500)
 #   ENV_NAME     — config name matching configs/{ENV_NAME}.yaml (optional)
 #
-# SBATCH directives are minimal — tune for your cluster.
+# SEED is taken from SLURM_ARRAY_TASK_ID when submitted as an array job,
+# or from the SEED env var when submitted via submit_single.sh.
+# ============================================================================
 
-#SBATCH --job-name=himher_${AGENT_TYPE}_s${SEED}
-#SBATCH --output=logs/slurm/%x_%j.out
-#SBATCH --error=logs/slurm/%x_%j.err
-#SBATCH --time=04:00:00
-#SBATCH --ntasks=1
-#SBATCH --cpus-per-task=4
-#SBATCH --mem=16G
-#SBATCH --gres=gpu:1              # Request 1 GPU; remove if CPU-only cluster
+module purge
+module load singularity
 
-# ---- environment setup ----
-set -euo pipefail
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$PROJECT_DIR"
+export SINGULARITY_BIND="/run,/ptmp,/scratch,/tmp,/opt/ohpc,${HOME}"
+export CONTAINER_PATH=/ptmp/containers/pytorch_1.10.0-cuda.11.3_latest-2021-12-02-ec95d31ea677.sif
+export PYTHONPATH="${PWD}:${PYTHONPATH:-}"
 
-if [[ -f "$PROJECT_DIR/venv/bin/activate" ]]; then
-    source "$PROJECT_DIR/venv/bin/activate"
-elif [[ -n "${VIRTUAL_ENV:-}" ]]; then
-    : # Already in a venv
-else
-    echo "[warn] No venv found; using system Python."
-fi
+mkdir -p slurm_logs
+mkdir -p logs
 
-echo "============================================"
-echo "HOST         : $(hostname)"
-echo "AGENT_TYPE   : ${AGENT_TYPE}"
-echo "SEED         : ${SEED}"
-echo "TOTAL_EPS    : ${TOTAL_EPS:-500}"
-echo "ENV_NAME     : ${ENV_NAME:-PredatorPrey}"
-echo "SLURM_JOB_ID : ${SLURM_JOB_ID:-local}"
-echo "============================================"
+# Resolve seed: array task ID takes precedence, then explicit SEED var
+SEED="${SEED:-${SLURM_ARRAY_TASK_ID:-0}}"
 
-# ---- build override args ----
+START_TIME=$(date +"%Y-%m-%d %H:%M:%S")
+
+echo "============================================================================"
+echo "HIM-HER EXPERIMENT - Task ${SLURM_ARRAY_TASK_ID:-single}"
+echo "============================================================================"
+echo "Job ID:       ${SLURM_JOB_ID:-local}"
+echo "Array Task:   ${SLURM_ARRAY_TASK_ID:-n/a}"
+echo "Agent type:   ${AGENT_TYPE}"
+echo "Seed:         ${SEED}"
+echo "Total eps:    ${TOTAL_EPS:-500}"
+echo "Env:          ${ENV_NAME:-PredatorPrey}"
+echo "Node:         ${SLURMD_NODENAME:-$(hostname)}"
+echo "Start Time:   ${START_TIME}"
+echo "Container:    ${CONTAINER_PATH}"
+echo "============================================================================"
+
+# ---- build Hydra override args ----
 OVERRIDES=(
     "agent.type=${AGENT_TYPE}"
     "training.seed=${SEED}"
@@ -51,10 +62,27 @@ OVERRIDES=(
 )
 
 if [[ -n "${ENV_NAME:-}" && "${ENV_NAME}" != "PredatorPrey" ]]; then
-    OVERRIDES+=("--config-name" "${ENV_NAME,,}")  # lowercase config name
+    OVERRIDES+=("--config-name" "${ENV_NAME,,}")
 fi
 
-# ---- run ----
-python scripts/train.py "${OVERRIDES[@]}" 2>&1
+# ---- run inside container (--nv passes through GPU) ----
+singularity exec --nv ${CONTAINER_PATH} \
+    python scripts/train.py "${OVERRIDES[@]}"
 
-echo "Done: agent=${AGENT_TYPE} seed=${SEED}"
+EXIT_CODE=$?
+
+echo "Task ${SLURM_ARRAY_TASK_ID:-single} completed with exit code: ${EXIT_CODE}"
+
+# Verify episodes CSV was created
+RUN_ID="${AGENT_TYPE}_seed${SEED}"
+ENV_LOWER=$(echo "${ENV_NAME:-predatorprey}" | tr '[:upper:]' '[:lower:]' | tr -d '_')
+EPISODES_CSV="logs/${ENV_LOWER}/${RUN_ID}/episodes.csv"
+if [[ -f "${EPISODES_CSV}" ]]; then
+    N=$(($(wc -l < "${EPISODES_CSV}") - 1))
+    echo "✓ episodes.csv verified: ${N} episodes logged"
+else
+    echo "✗ WARNING: ${EPISODES_CSV} not found!"
+    exit 1
+fi
+
+exit ${EXIT_CODE}
